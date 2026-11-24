@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: Test and package macOS arm64
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Set up Rust
+        run: rustup toolchain install stable --profile minimal --target aarch64-apple-darwin --no-self-update
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Test Node backend
+        run: npm test
+
+      - name: Verify rules and build Tauri app
+        run: npm run build:app
+
+      - name: Test Rust desktop code
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --release --target aarch64-apple-darwin
+
+      - name: Verify and package app and source
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          version=$(node -p "require('./package.json').version")
+          app='build/Clash Pro.app'
+          app_zip="build/Clash-Pro-${version}-macos-arm64.zip"
+          source_zip="build/Clash-Pro-${version}-source.zip"
+          test "$(lipo -archs "$app/Contents/MacOS/clash-pro")" = arm64
+          codesign --verify --strict "$app"
+          signature=$(codesign -d --verbose=2 "$app" 2>&1)
+          grep -qx 'Signature=adhoc' <<< "$signature"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$app_zip"
+          git archive --format=zip --prefix="clash-pro-${GITHUB_SHA:0:12}/" --output="$source_zip" "$GITHUB_SHA"
+          unzip -tq "$app_zip"
+          unzip -tq "$source_zip"
+          printf 'app_zip=%s\nsource_zip=%s\n' "$app_zip" "$source_zip" >> "$GITHUB_OUTPUT"
+          {
+            printf 'Commit: `%s`\n\n' "$GITHUB_SHA"
+            shasum -a 256 "$app_zip" "$source_zip" | sed 's/^/    /'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload macOS app
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ steps.package.outputs.app_zip }}
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload corresponding source
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ steps.package.outputs.source_zip }}
+          archive: false
+          if-no-files-found: error

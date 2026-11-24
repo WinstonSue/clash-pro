@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Clash Pro</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="sidebar-content">
+        <header class="brand">
+          <div class="brand-heading">
+            <div class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></div>
+            <h1>Clash Pro</h1>
+          </div>
+          <p>Clash Verge 分流<br>Tailscale 共享</p>
+        </header>
+        <nav aria-label="Clash Pro 页面">
+          <button type="button" id="nav-supplier" aria-controls="supplier-page" aria-current="page">供应商直连</button>
+          <button type="button" id="nav-gateway" aria-controls="gateway-page">Tailscale 跳板</button>
+        </nav>
+        <button type="button" class="help-trigger" id="open-help" aria-label="使用帮助" aria-haspopup="dialog" aria-controls="help-dialog">?</button>
+      </div>
+    </aside>
+    <main class="workspace">
+      <header class="topbar">
+        <span class="mode-status" id="active-mode" role="status"></span>
+        <span class="signal" id="controller" data-status="waiting">正在连接本机扩展</span>
+        <button type="button" id="copy-profile" disabled>复制 Clash 配置链接</button>
+      </header>
+
+      <p class="notice" id="connection-message" hidden></p>
+      <p class="notice" id="profile-message" role="status" hidden></p>
+      <label class="field" id="profile-fallback" hidden>
+        <span>Clash 配置链接</span>
+        <input id="profile-address" type="text" readonly>
+      </label>
+
+      <div class="workspace-page" id="supplier-page" aria-label="供应商直连">
+        <section class="card" id="local-settings" aria-labelledby="routing-title">
+          <div class="section-heading">
+            <h2 id="routing-title">分流</h2>
+            <span class="muted" id="route-summary">Agent 与日常共用地区</span>
+          </div>
+          <form id="region-form">
+            <fieldset class="inline-actions" id="region-fields" disabled>
+              <label class="field"><span>共用地区</span><select id="region" required></select></label>
+              <button type="submit" class="primary" id="save-region" disabled>保存地区</button>
+            </fieldset>
+            <p id="region-message" class="form-message" role="status"></p>
+          </form>
+          <p class="route-notes">从上往下尝试同地区节点。</p>
+          <div class="lane-grid" id="lane-grid"></div>
+          <p id="route-message" class="form-message" role="status"></p>
+
+          <section class="divided-section" id="supplier-section" aria-labelledby="suppliers-title">
+            <div class="section-heading">
+              <h3 id="suppliers-title">供应商管理</h3>
+              <button type="button" class="mutation primary" id="open-add-supplier">新增供应商</button>
+            </div>
+            <p id="supplier-message" class="form-message" role="status"></p>
+            <ul class="supplier-list" id="supplier-list" aria-label="供应商列表"></ul>
+            <p class="muted empty-suppliers" id="empty-suppliers" hidden>暂无供应商</p>
+          </section>
+        </section>
+
+        <section class="card" id="monitoring-card" aria-labelledby="monitor-title">
+          <div class="section-heading">
+            <div>
+              <h2 id="monitor-title">地区心跳</h2>
+              <p class="muted" id="monitor-summary">等待状态</p>
+            </div>
+            <button type="button" class="mutation" id="open-heartbeat" aria-haspopup="dialog">管理心跳地区</button>
+          </div>
+          <p id="heartbeat-message" class="form-message" role="status"></p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr id="health-columns"><th scope="col">地区</th></tr></thead>
+              <tbody id="health">
+                <tr><td class="muted">等待本机扩展…</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <section class="divided-section" aria-labelledby="alerts-title">
+            <div class="section-heading"><h3 id="alerts-title">近期提醒</h3></div>
+            <p id="no-alerts" class="muted">暂无提醒</p>
+            <ul id="alerts" class="alerts"></ul>
+          </section>
+        </section>
+      </div>
+
+      <div class="workspace-page" id="gateway-page" aria-label="Tailscale 跳板" hidden>
+        <section class="card gateway-card" aria-labelledby="gateway-title">
+          <div class="section-heading">
+            <h2 id="gateway-title">Tailscale 跳板</h2>
+            <span class="muted" id="gateway-status">未开启共享</span>
+          </div>
+          <div id="share-panel">
+            <div class="inline-actions">
+              <button class="mutation" type="button" id="scan-tailnet">查找设备</button>
+              <button class="mutation" type="button" id="toggle-share">开启共享</button>
+            </div>
+            <div class="inline-actions" id="authorize-panel" hidden>
+              <label class="field"><span>授权设备</span><select id="tailnet-devices"></select></label>
+              <button class="mutation" type="button" id="authorize-device">授权</button>
+            </div>
+            <ul class="plain-list" id="authorized-peers"></ul>
+          </div>
+          <form id="pair-form">
+            <label class="field">
+              <span>通过跳板上网</span>
+              <input type="password" name="code" placeholder="粘贴配对码" autocomplete="off" spellcheck="false" required>
+            </label>
+            <div class="inline-actions">
+              <button class="mutation primary" type="submit">验证并启用</button>
+              <button class="mutation" type="button" id="return-local" hidden>切回供应商直连</button>
+            </div>
+          </form>
+          <p id="gateway-message" class="form-message" role="status"></p>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog class="app-dialog wide-dialog" id="help-dialog" aria-labelledby="help-title">
+    <header class="section-heading">
+      <h2 id="help-title">使用帮助</h2>
+      <button type="button" data-close-dialog autofocus>关闭</button>
+    </header>
+    <div class="help-content">
+      <section>
+        <h3>接入 Clash Verge</h3>
+        <p>复制配置链接，在 Clash Verge 中导入并启用。增删供应商、调整顺序或切换代理方式后刷新订阅。</p>
+      </section>
+      <section>
+        <h3>供应商分流</h3>
+        <p>导入临时 HTTPS 订阅，为 Agent 和日常分别排序。两条线路共用地区，按各自的顺序尝试节点。</p>
+      </section>
+      <section>
+        <h3>地区心跳</h3>
+        <p>查看可用端点，按需设置检查间隔和额外地区。出现告警时，可从提醒打开对应供应商的导入弹窗。</p>
+      </section>
+      <section>
+        <h3>Tailscale 跳板</h3>
+        <p>两台设备加入同一 Tailscale 网络。出口机开启共享并授权，目标机用配对码启用，然后导入或刷新 Clash Verge 配置。</p>
+      </section>
+      <section>
+        <h3>指定下载（可选）</h3>
+        <p>在下载工具里手动填写本机 HTTP 代理。供应商直连模式下，境外下载走日常线路，国内和内网优先直连。</p>
+        <code id="help-download-address" hidden></code>
+      </section>
+    </div>
+  </dialog>
+
+  <dialog class="app-dialog" id="add-dialog" aria-labelledby="add-title">
+    <header class="section-heading">
+      <h2 id="add-title">新增供应商</h2>
+      <button type="button" data-close-dialog>关闭</button>
+    </header>
+    <form id="add-supplier">
+      <label class="field"><span>供应商名称</span><input name="name" maxlength="60" required autofocus></label>
+      <div class="form-footer">
+        <p id="add-message" class="form-message" role="status"></p>
+        <button class="mutation primary" type="submit">新增供应商</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="app-dialog wide-dialog" id="detail-dialog" aria-labelledby="detail-title">
+    <header class="section-heading">
+      <h2 id="detail-title">节点详情</h2>
+      <button type="button" data-close-dialog autofocus>关闭</button>
+    </header>
+    <p id="detail-message" class="form-message" role="status"></p>
+    <div id="node-groups" class="node-groups"></div>
+    <form class="detail-edit" id="rename-supplier">
+      <label class="field"><span>显示名称</span><input name="name" maxlength="60" required></label>
+      <div class="inline-actions">
+        <button class="mutation" type="submit">保存名称</button>
+      </div>
+      <p id="edit-message" class="form-message" role="status"></p>
+    </form>
+  </dialog>
+
+  <dialog class="app-dialog" id="import-dialog" aria-labelledby="import-title">
+    <header class="section-heading">
+      <h2 id="import-title">导入节点</h2>
+      <button type="button" data-close-dialog>关闭</button>
+    </header>
+    <form id="import-nodes">
+      <label class="field">
+        <span>临时 HTTPS 链接</span>
+        <input name="subscription" type="password" inputmode="url" autocomplete="off" spellcheck="false" required autofocus>
+      </label>
+      <div class="form-footer">
+        <p id="import-message" class="form-message" role="status"></p>
+        <button class="mutation primary" id="submit-import" type="submit">导入节点</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="app-dialog wide-dialog" id="heartbeat-dialog" aria-labelledby="heartbeat-title">
+    <header class="section-heading"><h2 id="heartbeat-title">管理心跳地区</h2></header>
+    <form id="heartbeat-form">
+      <fieldset id="heartbeat-fields" disabled>
+        <p id="heartbeat-current" class="muted"></p>
+        <div class="interval-grid">
+          <label class="field">
+            <span>当前地区间隔（分钟）</span>
+            <input id="interval-active" type="number" step="1" min="1" max="1440" required autofocus>
+          </label>
+          <label class="field">
+            <span>额外地区间隔（分钟）</span>
+            <input id="interval-extra" type="number" step="1" min="1" max="1440" required>
+          </label>
+        </div>
+        <fieldset class="extra-region-fields">
+          <legend>额外心跳地区</legend>
+          <div class="region-choices" id="extra-regions"></div>
+        </fieldset>
+        <div class="form-footer">
+          <p id="heartbeat-error" class="form-message" role="status"></p>
+          <div class="dialog-actions">
+            <button type="button" data-close-dialog>取消</button>
+            <button type="submit" class="primary" id="save-heartbeat" disabled>保存</button>
+          </div>
+        </div>
+      </fieldset>
+    </form>
+  </dialog>
+
+  <dialog class="app-dialog" id="remove-dialog" aria-labelledby="remove-title" aria-describedby="remove-impact remove-warning">
+    <header class="section-heading"><h2 id="remove-title">删除供应商</h2></header>
+    <p id="remove-impact"></p>
+    <p id="remove-warning" class="remove-warning" hidden></p>
+    <form id="remove-supplier">
+      <div class="form-footer">
+        <p id="remove-message" class="form-message" role="status"></p>
+        <div class="dialog-actions">
+          <button type="button" data-close-dialog autofocus>取消</button>
+          <button type="submit" class="mutation danger-action" id="confirm-remove">删除供应商</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+</body>
+</html>

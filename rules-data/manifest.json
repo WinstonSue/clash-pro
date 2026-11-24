@@ -1,0 +1,105 @@
+{
+  "revision": "13c258bce343dfc81d5600e535a59588386ef4b9",
+  "assets": {
+    "domain-private": {
+      "behavior": "domain",
+      "sha256": "df452ab1bfb572f366f00001fa4525f16f137dc670aed2c60af0100dc397d3ec"
+    },
+    "domain-cn": {
+      "behavior": "domain",
+      "sha256": "0b8c7c4d9773471991dd65737fdb16f3bf1baf2512c8b764d4c235318f01b7c6"
+    },
+    "domain-steam-cn": {
+      "behavior": "domain",
+      "sha256": "fd88dd091178deb2881b1f3be35d0bd0d0e92d912104e989b8b348e9d607e8d9"
+    },
+    "domain-openai": {
+      "behavior": "domain",
+      "sha256": "842a11bfebd1078258407617ac14380529e1f3873e0e01a87d9dc64300a4ba63"
+    },
+    "domain-anthropic": {
+      "behavior": "domain",
+      "sha256": "fd237979b2ee3132ce2003fdca9331e2abcdbfed52d1e6bbebfe06432182ffc6"
+    },
+    "domain-cursor": {
+      "behavior": "domain",
+      "sha256": "a5990e36146e2dafb08443f13d74d583ef66f533c779ce183b92f8d243522b35"
+    },
+    "domain-google": {
+      "behavior": "domain",
+      "sha256": "ad92420fecc12694f11af2ed86ddc5d233ec1350b1ae15e8d24959fda23bc200"
+    },
+    "domain-github": {
+      "behavior": "domain",
+      "sha256": "a15bd2cdd84db2ebcdca1ae3041265f90172445ebd6c07a6eb3118e5929e5fac"
+    },
+    "domain-gitlab": {
+      "behavior": "domain",
+      "sha256": "4a5fc306dd8e1a97818feb6278d24319f89a57ba3270fb84cac3a663b37c19c6"
+    },
+    "domain-wikimedia": {
+      "behavior": "domain",
+      "sha256": "96794269c8e7fd24c12d51245dd16d050de6b2e0225d74f6c16a51c17e92a6bd"
+    },
+    "domain-telegram": {
+      "behavior": "domain",
+      "sha256": "ffa4d1d3e8649965e529c1c570d8add75a0d6f70aa8503ece8add841ce48c0e7"
+    },
+    "domain-discord": {
+      "behavior": "domain",
+      "sha256": "d7387b23e75ca9a93086ee7f9d398efb936c64bdbb85d97aa7dea99de2381891"
+    },
+    "domain-whatsapp": {
+      "behavior": "domain",
+      "sha256": "23aa473f2a4f9069d31090271d3193ef4d9ed12b5e93e16c5ce23da75b8625a6"
+    },
+    "domain-reddit": {
+      "behavior": "domain",
+      "sha256": "3c7c686ade3088c4781d8bee262c61603618db5b2be4e3e63607b591db7b4ebc"
+    },
+    "domain-twitter": {
+      "behavior": "domain",
+      "sha256": "b287eac1d2a97da62e17cffddf55e0296665a289a41fba774fdba7397e6ea3f7"
+    },
+    "domain-facebook": {
+      "behavior": "domain",
+      "sha256": "f7792eedd3bb0966acd2800be52f983ef0eec339b2d0cfa3c1490afbdda29973"
+    },
+    "domain-instagram": {
+      "behavior": "domain",
+      "sha256": "561e6b0c2b760a3cf574d1e2c0b27da432b62eb9000e297b00dbc924614de73e"
+    },
+    "domain-youtube": {
+      "behavior": "domain",
+      "sha256": "e212b2ce9f39b30f4e2ab57da9ed0937673606bc56bb46e5d55ad7dd9af00aef"
+    },
+    "domain-netflix": {
+      "behavior": "domain",
+      "sha256": "daecea060b67af1c82fe9624e7a164f59d16be6ee4d61257526e0be0e9a5b57c"
+    },
+    "domain-disney": {
+      "behavior": "domain",
+      "sha256": "6c6da49c66ab6f8d0c84a969828315199e258cf5316b91aeb8c6bd9259898577"
+    },
+    "domain-spotify": {
+      "behavior": "domain",
+      "sha256": "a13485a346bf4add7f8d3859453b11c9a03f34e1bf047c991f13dbe57c2a7e3f"
+    },
+    "domain-tiktok": {
+      "behavior": "domain",
+      "sha256": "00db2983b3cb4365e56ae8bcdc7f6085caa12d9c4358dbcbb0c75f00ecf4f7bd"
+    },
+    "domain-gfw": {
+      "behavior": "domain",
+      "sha256": "84ef6af71dd987e3aa72991cb08935d0e6b3109b46086b1834bc67f6a784edfe"
+    },
+    "ip-cn": {
+      "behavior": "ipcidr",
+      "sha256": "895fd8e055ce9b26c297571c5244c2a314a1e2184122bd3b83276be75e0befb1"
+    },
+    "ip-telegram": {
+      "behavior": "ipcidr",
+      "sha256": "d121af95b9aeca3d8c29b2112d5e6685b2a6716383df8ae31b5fbb3408c527b3"
+    }
+  }
+}

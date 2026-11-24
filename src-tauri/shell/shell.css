@@ -1,0 +1,5 @@
+:root { color-scheme: light dark; font: 16px system-ui; }
+body { display: grid; place-items: center; min-height: 100vh; margin: 0; background: Canvas; color: CanvasText; }
+main { width: min(32rem, 80vw); text-align: center; }
+h1 { font-size: 24px; margin: 0 0 0.6rem; }
+p { color: GrayText; line-height: 1.55; margin: 0; }
