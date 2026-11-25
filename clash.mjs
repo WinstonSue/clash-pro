@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { AGENT_SELECTOR, DAILY_SELECTOR, LEGACY_DOWNLOAD_SELECTOR, JUMP, groupFor, PROBE_URL, encodeProvider } from './profiles.mjs';
-import { isSupplier, providerName } from './suppliers.mjs';
+import { allowlistName } from './routing.mjs';
+import { isSupplier, LANES, providerName } from './suppliers.mjs';
 
 const execute = promisify(execFile);
 const agentPath = `/proxies/${encodeURIComponent(AGENT_SELECTOR)}`;
@@ -101,6 +102,27 @@ export function createClash(socketPath) {
     return { agent: orders[0], daily: orders[1] };
   }
 
+  async function allowlistStatus() {
+    try {
+      const active = await call('/rules');
+      if (active.status !== 200 || !Array.isArray(active.data?.rules)) return 'offline';
+      const names = LANES.map(allowlistName);
+      const referenced = active.data.rules
+        .filter(rule => rule.type === 'RuleSet' && rule.proxy !== 'REJECT')
+        .map(rule => rule.payload);
+      if (!names.every(name => referenced.includes(name))) return 'unreferenced';
+      const response = await call('/providers/rules');
+      const providers = response.data?.providers;
+      if (response.status !== 200 || !providers || typeof providers !== 'object') return 'offline';
+      return names.every(name => {
+        const provider = providers[name];
+        return Number.isInteger(provider?.ruleCount) && provider.ruleCount >= 0 && Date.parse(provider.updatedAt) > 0;
+      }) ? 'loaded' : 'loading';
+    } catch {
+      return 'offline';
+    }
+  }
+
   async function select(path, name) {
     const reply = await call(path, { method: 'PUT', body: { name } });
     if (reply.status !== 204) throw new Error('Mihomo 拒绝切换地区。');
@@ -160,7 +182,7 @@ export function createClash(socketPath) {
     return detail.alive;
   }
 
-  return { view, selectRegion, updateProvider, probe, activeRoutes,
+  return { view, selectRegion, updateProvider, probe, activeRoutes, allowlistStatus,
     async hasProvider(id) { return (await call(providerPath(id))).status === 200; },
     async hasTopology(name) { return (await call(proxyPath(name))).status === 200; } };
 }

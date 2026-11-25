@@ -54,11 +54,29 @@ const addDialog = byId("add-dialog");
 const detailDialog = byId("detail-dialog");
 const importDialog = byId("import-dialog");
 const heartbeatDialog = byId("heartbeat-dialog");
+const allowlistDialog = byId("allowlist-dialog");
+const allowlistForm = byId("allowlist-form");
+const allowlistSource = byId("allowlist-source");
+const allowlistAck = byId("acknowledge-allowlist");
+let allowlistRevision;
+let allowlistPreview;
+let projectAllowlistURL;
+const routingDialog = byId("routing-dialog");
+const routingBrowser = byId("routing-browser");
+const routingSet = byId("routing-set");
+const routingQuery = byId("routing-query");
+const routingEntries = byId("routing-entries");
+const routingPrevious = byId("routing-previous");
+const routingNext = byId("routing-next");
+let routingRequest = 0;
+let routingEntriesRequest = 0;
+let routingPage = 1;
+let routingKeyword = "";
 const removeDialog = byId("remove-dialog");
 const helpDialog = byId("help-dialog");
 const openHelp = byId("open-help");
 const helpDownloadAddress = byId("help-download-address");
-const dialogs = [addDialog, detailDialog, importDialog, heartbeatDialog, removeDialog, helpDialog];
+const dialogs = [addDialog, detailDialog, importDialog, heartbeatDialog, allowlistDialog, routingDialog, removeDialog, helpDialog];
 const pageLabels = { local: "供应商直连", client: "Tailscale 跳板" };
 const protocolLabels = { ss: "Shadowsocks", anytls: "AnyTLS", trojan: "Trojan", vmess: "VMess", vless: "VLESS" };
 
@@ -98,7 +116,9 @@ async function request(path, body) {
   }
   const response = await fetch(`api/${path}`, options);
   const result = await response.json();
-  if (!response.ok) throw new Error(safeMessage(result?.error, "操作失败，请重试。"));
+  if (!response.ok) {
+    throw Object.assign(new Error(safeMessage(result?.error, "操作失败，请重试。")), { status: response.status });
+  }
   return result;
 }
 
@@ -508,6 +528,16 @@ function renderControls() {
   byId("save-region").disabled = locked || !dirtyRegion;
   byId("save-heartbeat").disabled = locked || !dirtyHeartbeat;
   for (const button of document.querySelectorAll(".mutation")) button.disabled = locked;
+  byId("allowlist-fields").disabled = locked || allowlistRevision === undefined;
+  byId("save-allowlist").disabled = locked || typeof allowlistRevision !== "string" || !allowlistAck.hidden;
+  allowlistAck.disabled = locked;
+  allowlistSource.disabled = locked;
+  byId("save-allowlist-source").disabled = locked;
+  byId("preview-allowlist").disabled = locked || !allowlistSource.value.trim();
+  byId("preview-project-allowlist").disabled = locked || !projectAllowlistURL;
+  byId("copy-project-allowlist").disabled = locked || !projectAllowlistURL;
+  byId("cancel-allowlist-preview").disabled = locked;
+  byId("apply-allowlist-preview").disabled = locked || !allowlistPreview;
   byId("confirm-remove").disabled = locked || !Object.hasOwn(state.suppliers, removalSupplier);
   for (const dialog of dialogs) dialog.querySelector("[data-close-dialog]").disabled = locked && dialog !== helpDialog;
   byId("submit-import").textContent = pendingAction === "import" ? "导入中…" : "导入节点";
@@ -527,6 +557,7 @@ function receive(next) {
   byId("active-mode").textContent = active ? `当前生效 · ${active}` : "代理方式尚未确认";
   message("connection-message", status === "ready" && !state.controller?.needsRefresh ? "" : hint,
     status === "error" ? "error" : "");
+  renderAllowlistStatus(state.allowlist);
   byId("copy-profile").disabled = !state.profileURL;
   helpDownloadAddress.hidden = !state.downloadPort;
   helpDownloadAddress.textContent = state.downloadPort ? `http://127.0.0.1:${state.downloadPort}` : "";
@@ -588,6 +619,186 @@ async function change(path, payload, place, success = "", action = path) {
   }
 }
 
+function renderAllowlistStatus(snapshot) {
+  if (!snapshot) return;
+  message("allowlist-status", snapshot.error || "规则已发布", snapshot.error ? "error" : "success");
+}
+
+function linkedRoutingRule(rule) {
+  const code = element("code");
+  let offset = 0;
+  for (const match of rule.matchAll(/\bRULE-SET,(?:clash-pro-)?([a-z0-9-]+)/g)) {
+    const [text, name] = match;
+    const button = element("button", text, "routing-reference");
+    button.type = "button";
+    button.addEventListener("click", () => {
+      const allowlist = byId(`routing-${name}`);
+      if (allowlist) {
+        allowlist.open = true;
+        allowlist.querySelector("summary").focus();
+        return;
+      }
+      routingSet.value = name;
+      routingQuery.value = "";
+      routingKeyword = "";
+      routingSet.focus();
+      void loadRoutingEntries(1);
+    });
+    code.append(rule.slice(offset, match.index), button);
+    offset = match.index + text.length;
+  }
+  code.append(rule.slice(offset));
+  return code;
+}
+
+function renderRouting(snapshot) {
+  const status = {
+    loaded: "已加载",
+    unreferenced: "当前配置未引用",
+    loading: "等待规则集加载",
+    offline: "无法读取内核",
+  };
+  message("routing-message", `Clash Verge 白名单 · ${status[snapshot.status]}`,
+    snapshot.status === "loaded" ? "success" : "");
+  byId("routing-profile-title").textContent = `主订阅规则 · ${pageLabels[snapshot.networkMode]}`;
+  byId("routing-order").replaceChildren(...snapshot.rules.map(rule => {
+    const parts = rule.split(",");
+    const option = parts.at(-1) === "no-resolve" ? parts.pop() : "";
+    const target = parts.pop();
+    const item = element("li");
+    const row = element("div", undefined, "routing-rule-row");
+    row.append(linkedRoutingRule(parts.join(",")),
+      element("code", option ? `${target},${option}` : target, "routing-rule-target"));
+    item.append(row);
+    return item;
+  }));
+  message("routing-allowlist-error", snapshot.error ? `当前显示最近发布的白名单。${snapshot.error}` : "",
+    snapshot.error ? "error" : "");
+  for (const [lane, list] of Object.entries(snapshot.allowlist)) {
+    byId(`routing-allowlist-${lane}`).querySelector("summary").textContent = `${laneNames[lane]} 白名单 · ${list.length} 条`;
+    byId(`routing-${lane}-entries`).replaceChildren(...list.map(rule => {
+      const item = element("li");
+      item.append(linkedRoutingRule(rule));
+      return item;
+    }));
+  }
+  byId("routing-revision").textContent = snapshot.revision;
+  const selected = routingSet.value;
+  const count = snapshot.ruleSets.reduce((sum, rules) => sum + rules.count, 0);
+  const all = element("option", `全部 ${snapshot.ruleSets.length} 组 · ${count.toLocaleString("zh-CN")} 条`);
+  all.value = "";
+  routingSet.replaceChildren(all, ...snapshot.ruleSets.map(({ name, count }) => {
+    const option = element("option", `${name} · ${count.toLocaleString("zh-CN")} 条`);
+    option.value = name;
+    return option;
+  }));
+  routingSet.value = selected;
+}
+
+async function loadRouting() {
+  const generation = ++routingRequest;
+  const refresh = byId("refresh-routing");
+  refresh.disabled = true;
+  message("routing-message", "正在读取分流规则…");
+  try {
+    const snapshot = await request("routing");
+    if (generation !== routingRequest || !routingDialog.open) return;
+    renderRouting(snapshot);
+    if (routingBrowser.hidden) {
+      routingBrowser.hidden = false;
+      void loadRoutingEntries(1);
+    }
+  } catch (error) {
+    if (generation === routingRequest && routingDialog.open) {
+      message("routing-message", safeMessage(error.message, "无法读取分流规则。"), "error");
+    }
+  } finally {
+    if (generation === routingRequest) refresh.disabled = false;
+  }
+}
+
+async function loadRoutingEntries(page) {
+  const generation = ++routingEntriesRequest;
+  const params = new URLSearchParams({ set: routingSet.value, q: routingKeyword, page });
+  routingPrevious.disabled = routingNext.disabled = true;
+  routingEntries.replaceChildren();
+  message("routing-results", "正在读取规则条目…");
+  try {
+    const result = await request(`routing/entries?${params}`);
+    if (generation !== routingEntriesRequest || !routingDialog.open) return;
+    routingPage = result.page;
+    const pages = Math.ceil(result.total / result.pageSize);
+    routingPrevious.disabled = page <= 1;
+    routingNext.disabled = page >= pages;
+    routingEntries.replaceChildren(...result.entries.map(({ ruleSet, rule }) => {
+      const item = element("li", undefined, "routing-rule-row");
+      item.append(element("code", rule));
+      if (!params.get("set")) item.append(element("span", ruleSet, "routing-rule-target"));
+      return item;
+    }));
+    routingEntries.scrollTop = 0;
+    message("routing-results", result.total
+      ? `${result.total.toLocaleString("zh-CN")} 条 · 第 ${page} / ${pages} 页` : "没有匹配的规则条目");
+  } catch (error) {
+    if (generation === routingEntriesRequest && routingDialog.open) {
+      message("routing-results", safeMessage(error.message, "无法读取规则条目。"), "error");
+    }
+  }
+}
+
+function fillAllowlist(rules) {
+  for (const lane of Object.keys(laneNames)) allowlistForm.elements[lane].value = rules[lane].join("\n");
+}
+
+function showAllowlistPreview(preview) {
+  allowlistPreview = preview;
+  byId("allowlist-preview").hidden = !preview;
+  byId("allowlist-diff").textContent = preview ? Object.entries(preview.changes).map(([lane, change]) => {
+    const lines = [...change.removed.map(rule => `− ${rule}`), ...change.added.map(rule => `+ ${rule}`)];
+    if (change.reordered) lines.push("现有规则顺序有变化。");
+    return [laneNames[lane], ...(lines.length ? lines : ["无变更"])].join("\n");
+  }).join("\n\n") : "";
+  renderControls();
+}
+
+async function actOnAllowlist(work) {
+  if (pendingAction) return;
+  begin("allowlist");
+  message("allowlist-message", "处理中…");
+  try {
+    await work();
+  } catch (error) {
+    if (error.status === 409) {
+      allowlistAck.hidden = false;
+      showAllowlistPreview(null);
+      message("allowlist-message", "文件已被修改，当前草稿已保留。请读取当前版本，远程替换需重新预览。", "error");
+    } else {
+      message("allowlist-message", safeMessage(error.message, "操作失败，请重试。"), "error");
+    }
+  } finally {
+    finish();
+  }
+}
+
+async function publishAllowlist(revision, rules) {
+  const snapshot = await request("allowlist", { action: "save", revision, rules });
+  allowlistRevision = snapshot.revision;
+  allowlistAck.hidden = true;
+  fillAllowlist(snapshot.rules);
+  showAllowlistPreview(null);
+  renderAllowlistStatus(snapshot);
+  message("allowlist-message", "规则已发布", "success");
+}
+
+function previewAllowlist(source, label) {
+  return actOnAllowlist(async () => {
+    showAllowlistPreview(null);
+    const preview = await request("allowlist", { action: "preview", ...source });
+    showAllowlistPreview(preview);
+    message("allowlist-message", `确认后会用${label}替换当前文件。`);
+  });
+}
+
 byId("nav-supplier").addEventListener("click", () => showPage("local"));
 byId("nav-gateway").addEventListener("click", () => showPage("client"));
 openHelp.addEventListener("click", () => helpDialog.showModal());
@@ -618,6 +829,87 @@ heartbeatDialog.addEventListener("close", () => {
 });
 removeDialog.addEventListener("close", () => {
   if (!removeDialog.open) removalSupplier = undefined;
+});
+
+byId("open-routing").addEventListener("click", () => {
+  routingSet.value = "";
+  routingQuery.value = routingKeyword = "";
+  routingBrowser.hidden = true;
+  routingDialog.showModal();
+  void loadRouting();
+});
+byId("refresh-routing").addEventListener("click", loadRouting);
+byId("routing-search").addEventListener("submit", event => {
+  event.preventDefault();
+  routingKeyword = routingQuery.value.trim();
+  void loadRoutingEntries(1);
+});
+routingSet.addEventListener("change", () => {
+  routingKeyword = routingQuery.value.trim();
+  void loadRoutingEntries(1);
+});
+routingPrevious.addEventListener("click", () => loadRoutingEntries(routingPage - 1));
+routingNext.addEventListener("click", () => loadRoutingEntries(routingPage + 1));
+
+byId("open-allowlist").addEventListener("click", () => {
+  allowlistRevision = undefined;
+  projectAllowlistURL = undefined;
+  allowlistForm.reset();
+  allowlistSource.value = "";
+  allowlistAck.hidden = true;
+  byId("project-fallback").hidden = true;
+  byId("project-address").value = "";
+  message("project-message");
+  showAllowlistPreview(null);
+  allowlistDialog.showModal();
+  void actOnAllowlist(async () => {
+    const snapshot = await request("allowlist");
+    allowlistRevision = snapshot.revision;
+    fillAllowlist(snapshot.rules);
+    byId("allowlist-file").textContent = snapshot.file;
+    byId("allowlist-sets").textContent = snapshot.ruleSets.join("、");
+    allowlistSource.value = snapshot.sourceURL;
+    projectAllowlistURL = snapshot.projectURL;
+    renderAllowlistStatus(snapshot);
+    message("allowlist-message", snapshot.error ?? "", snapshot.error ? "error" : "");
+  });
+});
+allowlistForm.addEventListener("submit", event => {
+  event.preventDefault();
+  if (typeof allowlistRevision !== "string" || !allowlistAck.hidden) return;
+  const rules = Object.fromEntries(Object.keys(laneNames).map(lane =>
+    [lane, allowlistForm.elements[lane].value.split("\n").map(rule => rule.trim()).filter(Boolean)]));
+  void actOnAllowlist(() => publishAllowlist(allowlistRevision, rules));
+});
+allowlistAck.addEventListener("click", () => actOnAllowlist(async () => {
+  const snapshot = await request("allowlist");
+  allowlistRevision = snapshot.revision;
+  renderAllowlistStatus(snapshot);
+  if (typeof allowlistRevision !== "string") {
+    message("allowlist-message", snapshot.error || "无法读取当前文件。", "error");
+    return;
+  }
+  allowlistAck.hidden = true;
+  message("allowlist-message", "已读取当前版本。草稿已保留，再次保存会替换当前规则。");
+}));
+allowlistSource.addEventListener("input", () => showAllowlistPreview(null));
+byId("save-allowlist-source").addEventListener("click", () => actOnAllowlist(async () => {
+  const { sourceURL } = await request("allowlist", { action: "source", url: allowlistSource.value.trim() });
+  allowlistSource.value = sourceURL;
+  message("allowlist-message", sourceURL ? "规则来源已保存。" : "规则来源已清除。", "success");
+}));
+byId("preview-allowlist").addEventListener("click", () =>
+  previewAllowlist({ url: allowlistSource.value.trim() }, "远程名单"));
+byId("preview-project-allowlist").addEventListener("click", () =>
+  previewAllowlist({ source: "project" }, "项目白名单"));
+byId("copy-project-allowlist").addEventListener("click", () =>
+  copy(projectAllowlistURL, "项目白名单更新地址", "project"));
+byId("cancel-allowlist-preview").addEventListener("click", () => {
+  showAllowlistPreview(null);
+  message("allowlist-message");
+});
+byId("apply-allowlist-preview").addEventListener("click", () => {
+  if (allowlistPreview) void actOnAllowlist(() => publishAllowlist(allowlistPreview.revision, allowlistPreview.rules));
 });
 
 byId("open-add-supplier").addEventListener("click", () => {
@@ -725,16 +1017,16 @@ byId("heartbeat-form").addEventListener("submit", async event => {
   }
 });
 
-async function copy(value, description) {
+async function copy(value, description, scope = "profile") {
   if (!value) return;
-  const field = byId("profile-address");
-  const fallback = byId("profile-fallback");
+  const field = byId(`${scope}-address`);
+  const fallback = byId(`${scope}-fallback`);
   fallback.querySelector("span").textContent = description;
   try {
     await navigator.clipboard.writeText(value);
     fallback.hidden = true;
     field.value = "";
-    message("profile-message", `${description}已复制。`);
+    message(`${scope}-message`, `${description}已复制。`);
   } catch {
     fallback.hidden = false;
     field.value = value;
@@ -745,10 +1037,10 @@ async function copy(value, description) {
     if (copied) {
       fallback.hidden = true;
       field.value = "";
-      message("profile-message", `${description}已复制。`);
+      message(`${scope}-message`, `${description}已复制。`);
       return;
     }
-    message("profile-message", "请复制选中的地址。");
+    message(`${scope}-message`, "请复制选中的地址。");
   }
 }
 

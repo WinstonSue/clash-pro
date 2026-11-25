@@ -4,13 +4,14 @@ import { createServer } from 'node:http';
 import { homedir, networkInterfaces } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ALLOWLIST_LIMIT, allowlistRuleSets, openAllowlist, parseAllowlist, projectAllowlistURL } from './allowlist.mjs';
 import { createClash, dailyGroupFor, validateNodes } from './clash.mjs';
 import { createMonitor } from './monitor.mjs';
 import { createGateway, decodePairing, encodePairing, newPeer, verifyPairing } from './gateway.mjs';
-import { buildProfile, encodeProvider, groupFor, parseSubscription, REGIONS, supplierNodeDetails } from './profiles.mjs';
-import { readPersonalDirect, readRuleAsset } from './routing.mjs';
+import { buildProfile, encodeProvider, groupFor, parseSubscription, profileRoutingRules, REGIONS, supplierNodeDetails } from './profiles.mjs';
+import { readPersonalDirect, readRuleAsset, ruleCatalog, searchRuleEntries } from './routing.mjs';
 import { openStore } from './state.mjs';
-import { fetchSubscription } from './subscription.mjs';
+import { fetchSubscription, parseLink } from './subscription.mjs';
 import { isSupplier, LANES, newSupplier, topology } from './suppliers.mjs';
 
 const assets = {
@@ -46,7 +47,7 @@ function json(res, status, body) {
   return respond(res, status, 'application/json; charset=utf-8', JSON.stringify(body));
 }
 
-async function readBody(req) {
+async function readBody(req, limit = 8_192) {
   if (req.headers['content-type']?.split(';')[0] !== 'application/json') {
     throw new ApiError(415, '请求格式不受支持。');
   }
@@ -54,7 +55,7 @@ async function readBody(req) {
   let size = 0;
   for await (const part of req) {
     size += part.length;
-    if (size > 8_192) throw new ApiError(413, '请求过大。');
+    if (size > limit) throw new ApiError(413, '请求过大。');
     parts.push(part);
   }
   try {
@@ -92,15 +93,25 @@ function parseSettings(body, previous) {
   return { region, extraRegions: [...new Set(extraRegions)].filter(code => code !== region), intervals: { active, extra } };
 }
 
+function parseAllowlistURL(value) {
+  if (typeof value === 'string' && value.length <= 4_096 && value.trim()) {
+    try { return parseLink(value.trim()).href; }
+    catch { /* The source must use the same public HTTPS transport as subscriptions. */ }
+  }
+  throw new ApiError(400, '请输入有效的公网 HTTPS 规则地址。');
+}
+
 export async function startApp({
   directory = process.env.CLASH_PRO_DATA_DIR || join(homedir(), 'Library', 'Application Support', 'Clash Pro'),
   port = 17880, downloadPort = 17881,
   clash = createClash(), download = fetchSubscription, validate = validateNodes,
+  downloadAllowlist = fetchSubscription,
   gateway = createGateway(), verify = verifyPairing,
   emit = (event) => process.stdout.write(`${JSON.stringify(event)}\n`), background = true,
 } = {}) {
   const personalDirect = await readPersonalDirect(directory);
   const store = await openStore(directory);
+  const allowlist = await openAllowlist(directory);
   const key = randomBytes(32).toString('base64url');
   const privatePath = `/ui/${key}/`;
   const activeImports = new Set();
@@ -147,8 +158,50 @@ export async function startApp({
         peers: state.sharing.peers.map(({ device, name, address }) => ({ device, name, address })) },
       controller: connection, health: monitor.snapshot(), alerts: state.alerts,
       profileURL: `http://127.0.0.1:${profilePort}/profile.yaml?key=${state.token}`,
-      downloadPort,
+      downloadPort, allowlist: allowlist.status(),
     };
+  }
+
+  async function updateAllowlist(body) {
+    if (body.action === 'source') {
+      const sourceURL = body.url === '' ? '' : parseAllowlistURL(body.url);
+      await store.change(state => ({ ...state, allowlistURL: sourceURL }));
+      return { sourceURL };
+    }
+    if (body.action === 'preview') {
+      const project = body.source === 'project';
+      const url = project ? projectAllowlistURL : parseAllowlistURL(body.url);
+      const { revision, rules: previous } = await allowlist.read();
+      let text;
+      try { text = await downloadAllowlist(url); }
+      catch (error) {
+        const label = project ? '项目白名单' : '远程白名单';
+        const detail = error?.message ?? '';
+        const status = /供应商返回 HTTP (\d{3})/.exec(detail)?.[1];
+        const reason = status ? `来源返回 HTTP ${status}。` :
+          /超时/.test(detail) ? '请求超时。' : '无法连接到来源。';
+        throw new ApiError(502, `无法获取${label}，${reason}`);
+      }
+      const rules = parseAllowlist(text);
+      const changes = Object.fromEntries(LANES.map(lane => {
+        const before = new Set(previous[lane]);
+        const after = new Set(rules[lane]);
+        const shared = rules[lane].filter(rule => before.has(rule));
+        return [lane, { added: rules[lane].filter(rule => !before.has(rule)),
+          removed: previous[lane].filter(rule => !after.has(rule)),
+          reordered: previous[lane].filter(rule => after.has(rule)).some((rule, index) => rule !== shared[index]) }];
+      }));
+      return { revision, rules, changes };
+    }
+    if (body.action === 'save') {
+      if (typeof body.revision !== 'string') throw new ApiError(400, '请先读取白名单文件版本。');
+      try { return await allowlist.replace(body.revision, body.rules); }
+      catch (error) {
+        if (['ALLOWLIST_INVALID', 'ALLOWLIST_CONFLICT'].includes(error.code)) throw error;
+        throw new ApiError(500, '无法发布白名单，请检查数据目录。');
+      }
+    }
+    throw new ApiError(400, '不支持的白名单操作。');
   }
 
   function updateConnection(current) {
@@ -400,6 +453,10 @@ export async function startApp({
         const rule = await readRuleAsset(ruleName);
         if (rule) return respond(res, 200, 'application/octet-stream', rule);
       }
+      const lane = /^\/rules\/allowlist-(agent|daily)\.txt$/.exec(path)?.[1];
+      if (req.method === 'GET' && lane && matchToken(req.headers.authorization, `Bearer ${state.token}`)) {
+        return respond(res, 200, 'text/plain; charset=utf-8', allowlist.feed(lane));
+      }
       const slot = /^\/providers\/([A-Za-z0-9]+)\.yaml$/.exec(path)?.[1];
       if (req.method === 'GET' && isSupplier(slot) && (Object.hasOwn(state.suppliers, slot) || Object.hasOwn(state.retired ?? {}, slot)) &&
           matchToken(req.headers.authorization, `Bearer ${state.token}`)) {
@@ -408,6 +465,29 @@ export async function startApp({
       if (!path.startsWith(privatePath)) throw new ApiError(404, '找不到本机资源。');
       const page = path.slice(privatePath.length);
       if (req.method === 'GET' && page === 'api/state') return json(res, 200, publicState());
+      if (req.method === 'GET' && page === 'api/routing') {
+        const [catalog, status] = await Promise.all([ruleCatalog(), clash.allowlistStatus?.()]);
+        const { rules, error } = allowlist.snapshot();
+        return json(res, 200, { ...catalog, networkMode: state.networkMode,
+          rules: profileRoutingRules(state.networkMode, personalDirect), allowlist: rules, error,
+          status: status ?? 'offline' });
+      }
+      if (req.method === 'GET' && page === 'api/routing/entries') {
+        const name = address.searchParams.get('set');
+        const query = address.searchParams.get('q') ?? '';
+        const rawPage = address.searchParams.get('page') ?? '1';
+        if (!/^[1-9]\d{0,8}$/.test(rawPage) || query.length > 253) {
+          throw new ApiError(400, '请输入有效的搜索词和页码。');
+        }
+        const result = await searchRuleEntries({ name, query, page: Number(rawPage) });
+        if (!result) throw new ApiError(404, '找不到该规则集。');
+        return json(res, 200, result);
+      }
+      if (req.method === 'GET' && page === 'api/allowlist') {
+        const snapshot = await allowlist.read();
+        return json(res, 200, { ...snapshot, file: allowlist.file, ruleSets: allowlistRuleSets,
+          sourceURL: store.get().allowlistURL ?? '', projectURL: projectAllowlistURL });
+      }
       const detailId = /^api\/suppliers\/([A-Za-z0-9]+)\/nodes$/.exec(page)?.[1];
       if (req.method === 'GET' && isSupplier(detailId) && Object.hasOwn(state.suppliers, detailId)) {
         return json(res, 200, { nodes: supplierNodeDetails(state.suppliers[detailId]?.nodes) });
@@ -418,9 +498,14 @@ export async function startApp({
       }
       const actions = { 'api/import': importSupplier, 'api/settings': writeSettings, 'api/suppliers': editSuppliers,
         'api/routes': editRoutes, 'api/gateway': editGateway, 'api/pairing': editPairing };
-      if (req.method === 'POST' && Object.hasOwn(actions, page)) {
+      const editingAllowlist = page === 'api/allowlist';
+      if (req.method === 'POST' && (editingAllowlist || Object.hasOwn(actions, page))) {
         if (req.headers.origin && req.headers.origin !== `http://127.0.0.1:${profilePort}`) {
           throw new ApiError(403, '无效的来源。');
+        }
+        if (editingAllowlist) {
+          const body = await readBody(req, ALLOWLIST_LIMIT + 8_192);
+          return json(res, 200, await updateAllowlist(body));
         }
         const body = await readBody(req);
         const extra = await actions[page](body);
@@ -430,8 +515,9 @@ export async function startApp({
       throw new ApiError(404, '找不到本机资源。');
     } catch (error) {
       if (!res.headersSent && !res.destroyed) {
-        json(res, error instanceof ApiError ? error.status : 500,
-          { error: error instanceof ApiError ? error.message : '本机处理失败，请重试。' });
+        const status = error instanceof ApiError ? error.status :
+          ({ ALLOWLIST_INVALID: 422, ALLOWLIST_CONFLICT: 409 })[error.code];
+        json(res, status ?? 500, { error: status ? error.message : '本机处理失败，请重试。' });
       }
     }
   });
@@ -442,16 +528,18 @@ export async function startApp({
   });
   profilePort = server.address().port;
   const url = `http://127.0.0.1:${profilePort}${privatePath}`;
-  let checkTimer, monitorTimer;
+  let checkTimer, monitorTimer, allowlistTimer;
   if (background) {
     checkTimer = setInterval(() => { void syncClash(); }, 5_000);
     monitorTimer = setInterval(() => { void monitor.tick().catch(() => {}); }, 2_000);
+    allowlistTimer = setInterval(() => { void allowlist.refresh(); }, 5_000);
     void syncClash();
   }
   return { url, syncClash, monitor, async close() {
     closed = true;
     clearInterval(checkTimer);
     clearInterval(monitorTimer);
+    clearInterval(allowlistTimer);
     await run(() => gateway.close());
     await new Promise((ok) => server.close(ok));
   } };

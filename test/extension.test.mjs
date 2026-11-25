@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { parse, stringify } from 'yaml';
-import { PROBE_URL, SECONDARY_PROBE_URL, parseSubscription, groupFor, JUMP } from '../profiles.mjs';
+import { openAllowlist, projectAllowlistURL } from '../allowlist.mjs';
+import { createClash } from '../clash.mjs';
+import { PROBE_URL, SECONDARY_PROBE_URL, parseSubscription, buildGatewayProfile, groupFor, JUMP } from '../profiles.mjs';
 import { createMonitor, checkRegion, monitorScopes } from '../monitor.mjs';
 import { startApp } from '../server.mjs';
 import { encodePairing } from '../gateway.mjs';
@@ -18,6 +22,27 @@ const fixture = (region = '日本', suffix = 'one') => stringify({
 });
 
 const offline = () => ({ state: 'offline', message: 'test' });
+const agentAllowlist = 'RULE-SET,clash-pro-allowlist-agent';
+const dailyAllowlist = 'RULE-SET,clash-pro-allowlist-daily';
+
+const agentServiceMatches = [
+  'DOMAIN-SUFFIX,aireiter.com',
+  'DOMAIN-SUFFIX,antigravity.google',
+  'DOMAIN,antigravity.googleapis.com',
+  'DOMAIN,antigravity-pa.googleapis.com',
+  'DOMAIN,agentaicode.googleapis.com',
+  'DOMAIN,aicode.googleapis.com',
+  'DOMAIN,antigravity-cli-auto-updater-974169037036.us-central1.run.app',
+];
+
+function assertProxyRule(rules, match, target, before) {
+  const rule = `${match},${target}`;
+  const index = rules.indexOf(rule);
+  assert.ok(index >= 0 && index < rules.indexOf(before), `missing or misplaced rule: ${rule}`);
+  assert.equal(rules[index + 1], `${match},REJECT`);
+}
+
+const readRuleProvider = ({ url, header }) => fetch(url, { headers: { Authorization: header.Authorization[0] } });
 
 async function launch(t, options = {}, personalDirect) {
   const directory = await mkdtemp(join(tmpdir(), 'clash-pro-test-'));
@@ -86,6 +111,9 @@ test('generated profile applies ordered whitelist rules, regional preferences an
   const state = await res.json();
   assert.deepEqual(state.extraRegions, ['HK']);
   const profile = parse(await (await fetch(state.profileURL)).text());
+  const routing = await (await api('routing')).json();
+  assert.deepEqual(routing.rules, profile.rules);
+  assert.equal(routing.networkMode, 'local');
   const groups = profile['proxy-groups'];
   assert.deepEqual(groups.filter((group) => group.type === 'select' && !group.hidden).map((group) => group['default-selected']),
     [groupFor('agent', 'SG'), groupFor('daily', 'SG')]);
@@ -94,10 +122,11 @@ test('generated profile applies ordered whitelist rules, regional preferences an
   const importantRules = [
     personal[0], `${personal[1]},no-resolve`, 'RULE-SET,clash-pro-domain-cn,DIRECT',
     'AND,((PROCESS-NAME,aria2c),(RULE-SET,clash-pro-ip-cn)),DIRECT',
-    'PROCESS-NAME,aria2c,ClashPro-Daily', 'DOMAIN,gemini.google.com,ClashPro-Agent',
-    'DOMAIN,registry.npmjs.org,DIRECT', 'RULE-SET,clash-pro-domain-github,ClashPro-Daily',
-    'RULE-SET,clash-pro-ip-telegram,ClashPro-Daily,no-resolve',
-    'RULE-SET,clash-pro-domain-gfw,ClashPro-Daily', 'RULE-SET,clash-pro-domain-gfw,REJECT',
+    'PROCESS-NAME,aria2c,ClashPro-Daily', `${agentAllowlist},ClashPro-Agent`,
+    'AND,((PROCESS-NAME,codex),(RULE-SET,clash-pro-ip-cn,no-resolve)),DIRECT',
+    'PROCESS-NAME,codex,ClashPro-Agent', 'DOMAIN,registry.npmjs.org,DIRECT',
+    `${dailyAllowlist},ClashPro-Daily`, `${dailyAllowlist},REJECT`,
+    'RULE-SET,clash-pro-ip-cn,DIRECT,no-resolve',
   ];
   let previousIndex = -1;
   for (const rule of importantRules) {
@@ -105,6 +134,20 @@ test('generated profile applies ordered whitelist rules, regional preferences an
     assert.ok(index > previousIndex, `missing or misplaced rule: ${rule}`);
     previousIndex = index;
   }
+  assertProxyRule(profile.rules, agentAllowlist, 'ClashPro-Agent', `${dailyAllowlist},ClashPro-Daily`);
+  const agentProvider = profile['rule-providers']['clash-pro-allowlist-agent'];
+  assert.equal(agentProvider.interval, 5);
+  assert.equal(agentProvider.proxy, 'DIRECT');
+  assert.equal((await fetch(agentProvider.url)).status, 404);
+  const agentRules = (await (await readRuleProvider(agentProvider)).text()).trim().split('\n');
+  for (const match of agentServiceMatches) assert.ok(agentRules.includes(match));
+  for (const host of ['accounts.google.com', 'oauth2.googleapis.com', 'storage.googleapis.com']) {
+    assert.ok(!agentRules.includes(`DOMAIN,${host}`));
+  }
+  const dailyRules = (await (await readRuleProvider(profile['rule-providers']['clash-pro-allowlist-daily'])).text()).trim().split('\n');
+  const lastDailyRules = ['AND,((RULE-SET,clash-pro-ip-telegram,no-resolve))', 'AND,((RULE-SET,clash-pro-domain-gfw))'];
+  assert.ok(dailyRules.includes('AND,((RULE-SET,clash-pro-domain-google))'));
+  assert.deepEqual(dailyRules.slice(-2), lastDailyRules);
   assert.equal(profile.rules.at(-1), 'MATCH,DIRECT');
   assert.doesNotMatch(JSON.stringify(state), /local-example/);
   const google = profile['rule-providers']['clash-pro-domain-google'];
@@ -115,6 +158,170 @@ test('generated profile applies ordered whitelist rules, regional preferences an
   assert.deepEqual(Buffer.from(await response.arrayBuffer()),
     await readFile(new URL('../rules-data/domain-google.mrs', import.meta.url)));
   assert.equal((await fetch(new URL('unknown.mrs', google.url), { headers })).status, 404);
+});
+
+test('bundled rule entries are browsable and searchable through the private routing API', async (t) => {
+  const { app, api } = await launch(t);
+  const { revision, ruleSets, allowlist } = await (await api('routing')).json();
+  assert.match(revision, /^[\da-f]{40}$/);
+  assert.equal(ruleSets.length, 25);
+  assert.ok(allowlist.daily.includes('RULE-SET,domain-gfw'));
+  const entries = async query => (await api(`routing/entries?${new URLSearchParams(query)}`)).json();
+  const raw = (await readFile(new URL('../rules-source/domain-cn.list', import.meta.url), 'utf8')).trimEnd().split('\n');
+  assert.equal(ruleSets.find(({ name }) => name === 'domain-cn').count, raw.length);
+  for (const number of [1, 2, Math.ceil(raw.length / 100)]) {
+    const result = await entries({ set: 'domain-cn', page: number });
+    assert.equal(result.total, raw.length);
+    assert.equal(result.pageSize, 100);
+    assert.deepEqual(result.entries.map(({ rule }) => rule), raw.slice((number - 1) * 100, number * 100));
+  }
+  assert.ok((await entries({ set: 'ip-telegram' })).entries.every(({ rule }) => rule.includes('/')));
+  const google = await entries({ q: 'WWW.GOOGLE.COM.' });
+  assert.ok(google.entries.some(({ ruleSet, rule }) => ruleSet === 'domain-google' && rule === '+.google.com'));
+  const github = await entries({ q: 'github.com' });
+  assert.ok(github.entries.some(({ ruleSet }) => ruleSet === 'domain-github'));
+  assert.ok(github.entries.some(({ ruleSet }) => ruleSet === 'domain-gfw'));
+  assert.equal((await entries({ q: 'challenges.cloudflare.com' })).total, 0);
+  assert.equal((await api('routing/entries?set=unknown')).status, 404);
+  assert.equal((await api('routing/entries?page=0')).status, 400);
+  for (const path of ['/api/routing', '/api/routing/entries']) {
+    assert.equal((await fetch(new URL(path, app.url))).status, 404);
+  }
+});
+
+test('routing overview reports which allowlists the running Clash Verge profile has loaded', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'cp-core-'));
+  const socket = join(directory, 'ctl.sock');
+  let rules = [{ type: 'RuleSet', payload: 'clash-pro-domain-gfw', proxy: 'ClashPro-Daily' }];
+  const providers = {};
+  const server = createServer((req, res) => res.end(JSON.stringify(req.url === '/rules' ? { rules } : { providers })));
+  await new Promise((resolve, reject) => server.once('error', reject).listen(socket, resolve));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { api } = await launch(t, { clash: createClash(socket) });
+  const status = async () => (await (await api('routing')).json()).status;
+  try {
+    assert.equal(await status(), 'unreferenced');
+    rules = ['agent', 'daily'].map(lane => ({ type: 'RuleSet', payload: `clash-pro-allowlist-${lane}`, proxy: 'route' }));
+    providers['clash-pro-allowlist-agent'] = { ruleCount: 0, updatedAt: '0001-01-01T00:00:00Z' };
+    providers['clash-pro-allowlist-daily'] = { ruleCount: 1, updatedAt: '2026-11-25T00:00:00Z' };
+    assert.equal(await status(), 'loading');
+    providers['clash-pro-allowlist-agent'].updatedAt = '2026-11-25T00:00:00Z';
+    assert.equal(await status(), 'loaded');
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+  assert.equal(await status(), 'offline');
+});
+
+test('allowlist saves, previews remote replacements, and detects concurrent updates', async (t) => {
+  const remote = { agent: ['RULE-SET,domain-github'], daily: [] };
+  const project = { agent: [], daily: ['DOMAIN-SUFFIX,project.example.test'] };
+  let projectOffline = false;
+  const downloaded = [];
+  const { api, directory, app } = await launch(t, { downloadAllowlist: async url => {
+    downloaded.push(url);
+    if (url === projectAllowlistURL) {
+      if (projectOffline) throw new Error('供应商返回 HTTP 404。请获取新的链接。');
+      return JSON.stringify(project);
+    }
+    if (url.endsWith('/offline')) throw new Error('remote test failure');
+    return url.endsWith('/invalid') ? '{"agent":[]}' : JSON.stringify(remote);
+  } });
+  const current = async () => (await api('allowlist')).json();
+  const save = (revision, rules) => api('allowlist', { action: 'save', revision, rules });
+  const state = await (await api('state')).json();
+  const profile = parse(await (await fetch(state.profileURL)).text());
+  const initial = await current();
+  assert.equal(initial.error, null);
+  assert.equal(initial.projectURL, projectAllowlistURL);
+  assert.deepEqual(JSON.parse(await readFile(initial.file, 'utf8')), initial.rules);
+  assert.equal((await fetch(new URL('/api/allowlist', app.url))).status, 404);
+  assert.equal((await fetch(new URL('api/allowlist', app.url),
+    { method: 'POST', headers: { Origin: 'https://example.test' } })).status, 403);
+  for (const rule of ['RULE-SET,domain-cn', 'RULE-SET,ip-telegram', 'DOMAIN,example.test,DIRECT']) {
+    assert.equal((await save(initial.revision, { agent: [rule], daily: [] })).status, 422);
+  }
+  const manual = { agent: ['DOMAIN,MANUAL.example.test', 'DOMAIN,manual.example.test'], daily: [] };
+  const written = await save(initial.revision, manual);
+  assert.equal(written.status, 200);
+  const saved = await written.json();
+  assert.deepEqual(saved.rules, { agent: ['DOMAIN,manual.example.test'], daily: [] });
+  assert.equal(await (await readRuleProvider(profile['rule-providers']['clash-pro-allowlist-agent'])).text(),
+    'DOMAIN,manual.example.test\n');
+  assert.equal(await (await readRuleProvider(profile['rule-providers']['clash-pro-allowlist-daily'])).text(),
+    '# Empty allowlist\n');
+
+  const source = 'https://rules.example.test/allowlist';
+  assert.equal((await api('allowlist', { action: 'source', url: 'https://127.0.0.1/rules' })).status, 400);
+  assert.equal((await api('allowlist', { action: 'source', url: source })).status, 200);
+  assert.equal((await current()).sourceURL, source);
+  const preview = async url => api('allowlist', { action: 'preview', url });
+  assert.equal((await preview('https://rules.example.test/offline')).status, 502);
+  assert.equal((await preview('https://rules.example.test/invalid')).status, 422);
+  const first = await (await preview(source)).json();
+  assert.deepEqual(first.rules, remote);
+  assert.deepEqual(first.changes.agent, { added: remote.agent, removed: saved.rules.agent, reordered: false });
+  assert.deepEqual((await current()).rules, saved.rules);
+  const previewProject = () => api('allowlist', { action: 'preview', source: 'project', url: source });
+  projectOffline = true;
+  const unavailable = await previewProject();
+  assert.equal(unavailable.status, 502);
+  assert.match((await unavailable.json()).error, /项目白名单.*HTTP 404/);
+  projectOffline = false;
+  const projectPreview = await (await previewProject()).json();
+  assert.equal(downloaded.at(-1), projectAllowlistURL);
+  assert.deepEqual(projectPreview.rules, project);
+  assert.equal((await current()).sourceURL, source);
+  assert.deepEqual((await current()).rules, saved.rules);
+
+  const file = join(directory, 'proxy-allowlist.json');
+  const external = { agent: ['DOMAIN-SUFFIX,external.example.test'], daily: ['RULE-SET,ip-telegram'] };
+  await writeFile(file, JSON.stringify(external));
+  assert.equal((await save(first.revision, first.rules)).status, 409);
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), external);
+  const latest = await (await preview(source)).json();
+  const results = await Promise.all([save(latest.revision, latest.rules), save(latest.revision, saved.rules)]);
+  assert.deepEqual(results.map(response => response.status).sort(), [200, 409]);
+  const winning = await results.find(response => response.ok).json();
+  assert.deepEqual((await current()).rules, winning.rules);
+  if (winning.rules.agent[0] !== remote.agent[0]) {
+    assert.equal((await save(winning.revision, latest.rules)).status, 200);
+  }
+  assert.equal(await (await readRuleProvider(profile['rule-providers']['clash-pro-allowlist-agent'])).text(),
+    'AND,((RULE-SET,clash-pro-domain-github))\n');
+  const freshProject = await (await previewProject()).json();
+  assert.equal((await save(freshProject.revision, freshProject.rules)).status, 200);
+  assert.deepEqual((await current()).rules, project);
+  assert.equal((await current()).sourceURL, source);
+});
+
+test('external edits are polled and a malformed file retains the last good rules after restart', { timeout: 12_000 }, async (t) => {
+  const { api, directory } = await launch(t, { background: true });
+  const { profileURL } = await (await api('state')).json();
+  const profile = parse(await (await fetch(profileURL)).text());
+  const provider = profile['rule-providers']['clash-pro-allowlist-agent'];
+  const file = join(directory, 'proxy-allowlist.json');
+  const rules = { agent: ['DOMAIN,polled.example.test'], daily: [] };
+  await writeFile(file, JSON.stringify(rules));
+  const deadline = Date.now() + 8_000;
+  let feed;
+  do {
+    feed = await (await readRuleProvider(provider)).text();
+    if (feed === 'DOMAIN,polled.example.test\n') break;
+    await delay(100);
+  } while (Date.now() < deadline);
+  assert.equal(feed, 'DOMAIN,polled.example.test\n');
+
+  await writeFile(file, '{');
+  const invalid = await (await api('allowlist')).json();
+  assert.match(invalid.error, /JSON/);
+  assert.deepEqual(invalid.rules, rules);
+  assert.equal(await (await readRuleProvider(provider)).text(), feed);
+  const restarted = await openAllowlist(directory);
+  assert.deepEqual((await restarted.read()).rules, rules);
+  await rm(file);
+  assert.match((await restarted.read()).error, /未找到/);
+  assert.equal(restarted.feed('agent'), feed);
 });
 
 test('routing region and heartbeat settings save independently', async (t) => {
@@ -240,12 +447,29 @@ test('pairing is bound to the target and the generated client has a single hop',
   assert.doesNotMatch(JSON.stringify(state), /AgICAg/);
   const profile = parse(await (await fetch(state.profileURL)).text());
   assert.equal(profile.proxies[0].name, JUMP);
+  const routing = await (await api('routing')).json();
+  assert.deepEqual(routing.rules, profile.rules);
+  assert.equal(routing.networkMode, 'client');
   assert.equal(profile.proxies[0].password, key);
   assert.equal(profile.proxies[0].udp, true);
-  assert.ok(profile.rules.includes('RULE-SET,clash-pro-domain-youtube,ClashPro-Jump'));
+  assert.ok(profile.rules.includes(`${dailyAllowlist},${JUMP}`));
   assert.ok(profile.rules.includes('RULE-SET,clash-pro-domain-cn,DIRECT'));
+  assertProxyRule(profile.rules, agentAllowlist, JUMP, `${dailyAllowlist},${JUMP}`);
   assert.equal(profile['proxy-providers'], undefined);
   assert.equal(profile.rules.at(-1), 'MATCH,DIRECT');
+});
+
+test('gateway uses the Agent TCP and UDP groups for the same editable Agent allowlist', () => {
+  const region = 'JP';
+  const state = { token: 'test-token', region, intervals: { active: 10 }, extraRegions: [],
+    routes: { agent: [], daily: [] }, suppliers: {} };
+  const profile = buildGatewayProfile({ port: 17880, state, peers: [] });
+  const agent = groupFor('agent', region);
+  const daily = groupFor('daily', region);
+  assertProxyRule(profile.rules, `AND,((NETWORK,udp),(${agentAllowlist}))`, `${agent}-UDP`, `${agentAllowlist},${agent}`);
+  assertProxyRule(profile.rules, agentAllowlist, agent, `NETWORK,tcp,${daily}`);
+  assert.equal(profile['rule-providers']['clash-pro-allowlist-agent'].interval, 5);
+  assert.equal(profile['rule-providers']['clash-pro-allowlist-daily'], undefined);
 });
 
 test('a saved priority edit or supplier removal preserves the active configuration until refresh', async (t) => {

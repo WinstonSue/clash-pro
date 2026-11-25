@@ -296,6 +296,12 @@ export function jumpProxy(pairing) {
     cipher: JUMP_CIPHER, password: pairing.key, udp: true };
 }
 
+export function profileRoutingRules(networkMode, personalDirect) {
+  const client = networkMode === 'client';
+  return routingRules({ agent: client ? JUMP : AGENT_SELECTOR, daily: client ? JUMP : DAILY_SELECTOR,
+    downloadInbound: DOWNLOAD_INBOUND, personalDirect: client ? [] : personalDirect });
+}
+
 export function buildProfile({ port, state, downloadPort, personalDirect = [] }) {
   const { token, region, routes, suppliers, networkMode, pairing } = state;
   const codes = Object.keys(REGIONS);
@@ -308,8 +314,7 @@ export function buildProfile({ port, state, downloadPort, personalDirect = [] })
     listeners: [{ name: DOWNLOAD_INBOUND, type: 'mixed', listen: '127.0.0.1', port: downloadPort }],
     'rule-providers': ruleProviders(port, token),
     'proxy-groups': [{ name: topology(state), type: 'select', proxies: ['REJECT'], hidden: true }],
-    rules: routingRules({ agent: client ? JUMP : AGENT_SELECTOR, daily: client ? JUMP : DAILY_SELECTOR,
-      downloadInbound: DOWNLOAD_INBOUND, personalDirect: client ? [] : personalDirect }),
+    rules: profileRoutingRules(networkMode, personalDirect),
   };
   if (client) profile.proxies = [jumpProxy(pairing)];
   else {
@@ -343,7 +348,7 @@ export function buildGatewayProfile({ port, state, peers, outboundInterface }) {
       port: peer.backend, cipher: JUMP_CIPHER, password: peer.key, udp: true })),
     proxies: nodes.map(({ proxy }) => ({ ...proxy, ...(outboundInterface ? { 'interface-name': outboundInterface } : {}) })),
     'proxy-groups': groups,
-    'rule-providers': ruleProviders(port, token),
+    'rule-providers': ruleProviders(port, token, ['agent']),
     rules: gatewayRules({ agent: groups[0].name, agentUDP: groups[1].name, daily: groups[2].name, dailyUDP: groups[3].name }),
   };
 }

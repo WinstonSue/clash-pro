@@ -19,8 +19,9 @@ mkdir -p "$resources/public"
 "$node_path" --input-type=module -e 'import { verifyRuleAssets } from "./routing.mjs"; await verifyRuleAssets();'
 cp "$root"/*.mjs "$root/package.json" "$root/package-lock.json" "$root/LICENSE" "$resources/"
 cp "$root/public/"* "$resources/public/"
-mkdir -p "$resources/rules-data"
+mkdir -p "$resources/rules-data" "$resources/rules-source"
 cp "$root/rules-data/"* "$resources/rules-data/"
+cp "$root/rules-source/"*.list "$resources/rules-source/"
 printf '%s\n' "$node_path" > "$resources/node-path.txt"
 npm ci --prefix "$resources" --cache "$build_dir/npm-cache" --omit=dev --ignore-scripts --no-audit --no-fund
 

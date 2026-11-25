@@ -2,9 +2,14 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
+import { domainToASCII } from 'node:url';
 import manifest from './rules-data/manifest.json' with { type: 'json' };
 
 const assetVersion = manifest.revision.slice(0, 12);
+export const allowlistName = lane => `clash-pro-allowlist-${lane}`;
+const allowlistSet = lane => `RULE-SET,${allowlistName(lane)}`;
+const rulePageSize = 100;
+let ruleSources;
 
 export async function readRuleAsset(name) {
   if (!Object.hasOwn(manifest.assets, name)) return null;
@@ -20,15 +25,60 @@ export async function verifyRuleAssets() {
   }));
 }
 
-export function ruleProviders(port, token) {
-  return Object.fromEntries(Object.entries(manifest.assets).map(([name, { behavior }]) => [
+function readRuleSources() {
+  return ruleSources ??= Promise.all(Object.entries(manifest.assets).map(async ([name, { behavior }]) => {
+    const source = await readFile(new URL(`rules-source/${name}.list`, import.meta.url), 'utf8');
+    return { name, behavior, lines: source.split(/\r?\n/).filter(line => line && !line.startsWith('#')) };
+  }));
+}
+
+export async function ruleCatalog() {
+  const sources = await readRuleSources();
+  return { revision: manifest.revision, ruleSets: sources.map(({ name, behavior, lines }) =>
+    ({ name, behavior, count: lines.length })) };
+}
+
+export async function searchRuleEntries({ name, query, page }) {
+  if (name && !Object.hasOwn(manifest.assets, name)) return null;
+  const keyword = query.trim().toLowerCase();
+  const host = keyword.includes('.') && /^[\p{L}\p{N}\p{M}.-]+$/u.test(keyword)
+    ? domainToASCII(keyword.replace(/\.$/, '')) : '';
+  const start = (page - 1) * rulePageSize;
+  const entries = [];
+  let total = 0;
+  for (const { name: ruleSet, behavior, lines } of await readRuleSources()) {
+    if (name && ruleSet !== name) continue;
+    for (const rule of lines) {
+      const entry = rule.toLowerCase();
+      const suffix = entry.startsWith('+.') ? entry.slice(2) : '';
+      const domainMatch = behavior === 'domain' && host &&
+        (entry === host || (suffix && (host === suffix || host.endsWith(`.${suffix}`))));
+      if (!entry.includes(keyword) && !domainMatch) continue;
+      if (total >= start && entries.length < rulePageSize) entries.push({ ruleSet, rule });
+      total += 1;
+    }
+  }
+  return { page, pageSize: rulePageSize, total, entries };
+}
+
+export function ruleProviders(port, token, lanes = ['agent', 'daily']) {
+  const providers = Object.entries(manifest.assets).map(([name, { behavior }]) => [
     `clash-pro-${name}`, {
       type: 'http', behavior, format: 'mrs', proxy: 'DIRECT',
       url: `http://127.0.0.1:${port}/rules/${name}.mrs`,
       path: `./provider/rule-set/clash-pro-${assetVersion}/${name}.mrs`,
       header: { Authorization: [`Bearer ${token}`] },
     },
-  ]));
+  ]);
+  for (const lane of lanes) {
+    providers.push([allowlistName(lane), {
+      type: 'http', behavior: 'classical', format: 'text', proxy: 'DIRECT', interval: 5,
+      url: `http://127.0.0.1:${port}/rules/allowlist-${lane}.txt`,
+      path: `./provider/rule-set/clash-pro-allowlist-v1/${lane}.txt`,
+      header: { Authorization: [`Bearer ${token}`] },
+    }]);
+  }
+  return Object.fromEntries(providers);
 }
 
 function isPersonalDirectRule(rule) {
@@ -66,14 +116,6 @@ const localNetworks = [
   '127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', '169.254.0.0/16',
 ];
 
-const agentHosts = [
-  ...['openai', 'anthropic', 'cursor'].map(domainSet),
-  ...suffixes(['openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com',
-    'anthropic.com', 'claude.ai', 'cursor.com', 'cursor.sh', 'githubcopilot.com']),
-  ...exact(['gemini.google.com', 'aistudio.google.com', 'generativelanguage.googleapis.com',
-    'copilot.microsoft.com', 'copilot-proxy.githubusercontent.com']),
-];
-
 const agentProcesses = [
   'PROCESS-NAME,codex',
   'PROCESS-NAME,claude',
@@ -96,12 +138,6 @@ const bulkDirect = [
   ...suffixes(['ghcr.io', 'quay.io', 'mcr.microsoft.com']),
 ];
 
-const dailyHosts = [
-  ...['youtube', 'netflix', 'disney', 'spotify', 'tiktok', 'google', 'github', 'gitlab', 'wikimedia',
-    'telegram', 'discord', 'whatsapp', 'reddit', 'twitter', 'facebook', 'instagram'].map(domainSet),
-  ...suffixes(['stackoverflow.com', 'stackexchange.com', 'x.com']),
-];
-
 function forPolicy(matches, policy) {
   // Mihomo can fall through a rule whose selected proxy does not handle UDP.
   return matches.flatMap(match => [`${match},${policy}`, `${match},REJECT`]);
@@ -121,14 +157,11 @@ export function routingRules({ agent, daily, downloadInbound, personalDirect }) 
     ...['cn', 'steam-cn'].map(name => `${domainSet(name)},DIRECT`),
     ...downloadMatches.map(match => directChinaIP(match)),
     ...forPolicy(downloadMatches, daily),
-    ...forPolicy(agentHosts, agent),
+    ...forPolicy([allowlistSet('agent')], agent),
     ...agentProcesses.map(match => directChinaIP(match, ',no-resolve')),
     ...forPolicy(agentProcesses, agent),
     ...bulkDirect.map(match => `${match},DIRECT`),
-    ...forPolicy(dailyHosts, daily),
-    `${ipSet('telegram')},${daily},no-resolve`,
-    `${ipSet('telegram')},REJECT,no-resolve`,
-    ...forPolicy([domainSet('gfw')], daily),
+    ...forPolicy([allowlistSet('daily')], daily),
     `${ipSet('cn')},DIRECT,no-resolve`,
     'MATCH,DIRECT',
   ];
@@ -141,8 +174,8 @@ export function gatewayRules({ agent, daily, agentUDP, dailyUDP }) {
     ...suffixes(['localhost', 'local', 'ts.net']).map(match => `${match},REJECT`),
     ...[...localNetworks, '0.0.0.0/8', '224.0.0.0/3'].map(cidr => `IP-CIDR,${cidr},REJECT,no-resolve`),
     ...['::/128', '::1/128', 'fc00::/7', 'fe80::/10', 'ff00::/8'].map(cidr => `IP-CIDR6,${cidr},REJECT,no-resolve`),
-    ...forPolicy(agentHosts.map(udp), agentUDP),
-    ...forPolicy(agentHosts, agent),
+    ...forPolicy([udp(allowlistSet('agent'))], agentUDP),
+    ...forPolicy([allowlistSet('agent')], agent),
     ...forPolicy(['NETWORK,udp'], dailyUDP),
     ...forPolicy(['NETWORK,tcp'], daily),
     'MATCH,REJECT',

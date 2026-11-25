@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -52,6 +53,9 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           version=$(node -p "require('./package.json').version")
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            test "$GITHUB_REF_NAME" = "v$version"
+          fi
           app='build/Clash Pro.app'
           app_zip="build/Clash-Pro-${version}-macos-arm64.zip"
           source_zip="build/Clash-Pro-${version}-source.zip"
@@ -82,3 +86,27 @@ jobs:
           path: ${{ steps.package.outputs.source_zip }}
           archive: false
           if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: macos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified ZIPs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release with app and source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/Clash-Pro-${version}-macos-arm64.zip" "dist/Clash-Pro-${version}-source.zip" \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --notes-from-tag --title "Clash Pro $GITHUB_REF_NAME"

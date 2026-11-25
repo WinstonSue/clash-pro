@@ -7,6 +7,9 @@ src-tauri/gen/
 .env.*
 *.log
 personal-direct.json
+proxy-allowlist.json
+proxy-allowlist.last-good.json
+proxy-allowlist*.json.*.tmp
 state.json
 state.json.*.tmp
 state-v1.backup.json
