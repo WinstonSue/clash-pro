@@ -99,14 +99,25 @@ jobs:
       - name: Download verified ZIPs
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          path: dist
-          merge-multiple: true
+          path: artifacts
+          skip-decompress: true
 
       - name: Publish release with app and source
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
+          app="Clash-Pro-${version}-macos-arm64.zip"
+          source="Clash-Pro-${version}-source.zip"
+          mkdir dist
+          for archive in "$app" "$source"; do
+            files=("artifacts/$archive/"*)
+            test "${#files[@]}" -eq 1
+            test -f "${files[0]}"
+            mv -- "${files[0]}" "dist/$archive"
+            unzip -tq "dist/$archive"
+          done
           gh release create "$GITHUB_REF_NAME" \
-            "dist/Clash-Pro-${version}-macos-arm64.zip" "dist/Clash-Pro-${version}-source.zip" \
+            "dist/$app" "dist/$source" \
             --repo "$GITHUB_REPOSITORY" --verify-tag --notes-from-tag --title "Clash Pro $GITHUB_REF_NAME"
